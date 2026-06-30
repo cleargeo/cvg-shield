@@ -13,7 +13,9 @@ ctx.verify_mode = ssl.CERT_NONE
 UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 CVG-Shield/2.1"
 
 def init_db():
-    conn = sqlite3.connect(DB)
+    conn = sqlite3.connect(DB, timeout=30)
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA synchronous=NORMAL")
     c = conn.cursor()
     c.execute("CREATE TABLE IF NOT EXISTS c2_ips (ip TEXT PRIMARY KEY, first_seen TEXT, feeds TEXT, malware TEXT, confidence INTEGER)")
     c.execute("CREATE TABLE IF NOT EXISTS c2_domains (domain TEXT PRIMARY KEY, first_seen TEXT, feeds TEXT, threat TEXT)")
@@ -40,13 +42,16 @@ def ingest_feodo(conn):
     reader = csv.reader(io.StringIO(data))
     count = 0
     for row in reader:
-        if len(row) >= 6 and row[1].count(".") == 3:
-            try:
-                conn.execute("INSERT OR IGNORE INTO c2_ips VALUES (?,?,?,?,?)",
-                    (row[1], row[0], "feodo", row[5], 90))
-                count += 1
-            except:
-                pass
+        row = [r.strip().strip('"').strip() for r in row]
+        if len(row) >= 6 and row[0] and not row[0].startswith("#"):
+            ip = row[1]
+            if ip.count(".") == 3 and ip.replace(".", "").replace("-", "").isdigit():
+                try:
+                    conn.execute("INSERT OR IGNORE INTO c2_ips VALUES (?,?,?,?,?)",
+                        (ip, row[0], "feodo", row[5], 90))
+                    count += 1
+                except:
+                    pass
     conn.commit()
     return count
 
@@ -55,12 +60,15 @@ def ingest_sslbl(conn):
     reader = csv.reader(io.StringIO(data))
     count = 0
     for row in reader:
-        if len(row) == 3 and not row[0].startswith("#") and ":" not in row[0]:
-            try:
-                conn.execute("INSERT OR IGNORE INTO ssl_ja3 VALUES (?,?,?)", (row[1][:64], row[0], row[2]))
-                count += 1
-            except:
-                pass
+        row = [r.strip().strip('"') for r in row]
+        if len(row) == 3 and row[0] and not row[0].startswith("#"):
+            ja3_hash = row[1]
+            if len(ja3_hash) >= 32 and ja3_hash.isalnum():
+                try:
+                    conn.execute("INSERT OR IGNORE INTO ssl_ja3 VALUES (?,?,?)", (ja3_hash[:64], row[0], row[2]))
+                    count += 1
+                except:
+                    pass
     conn.commit()
     return count
 
@@ -72,28 +80,34 @@ def ingest_urlhaus(conn):
     reader = csv.reader(io.StringIO(data))
     count = 0
     for row in reader:
-        if len(row) >= 8 and row[0].isdigit():
-            url = row[2].strip().strip('"')
-            threat = row[7].strip().strip('"') if len(row) > 7 else ""
-            if url.startswith("http"):
-                h = hashlib.md5(url.encode()).hexdigest()
-                try:
-                    conn.execute("INSERT OR IGNORE INTO c2_urls VALUES (?,?,?,?)", (h, url[:500], row[1], threat))
-                    count += 1
-                except:
-                    pass
+        if len(row) >= 8:
+            id_val = row[0].strip().strip('"').lstrip('#')
+            if id_val.isdigit():
+                url = row[2].strip().strip('"')
+                threat = row[7].strip().strip('"') if len(row) > 7 else ""
+                if url.startswith("http"):
+                    h = hashlib.md5(url.encode()).hexdigest()
+                    try:
+                        conn.execute("INSERT OR IGNORE INTO c2_urls VALUES (?,?,?,?)", (h, url[:500], row[1].strip().strip('"'), threat))
+                        count += 1
+                    except:
+                        pass
     conn.commit()
+    return count
 
 def ingest_misp_osint(conn):
-    """CIRCL MISP OSINT feed - 1,635 events with ~ C2 indicators"""
+    """CIRCL MISP OSINT feed - samples events for C2 indicators"""
     manifest = fetch_json("https://www.circl.lu/doc/misp/feed-osint/manifest.json")
     total = {"ips": 0, "domains": 0, "urls": 0, "hashes": 0, "events": 0}
     
-    for event_id in manifest.keys():
+    # Process all events but batch commits
+    event_ids = list(manifest.keys())
+    for i, event_id in enumerate(event_ids):
         try:
             url = f"https://www.circl.lu/doc/misp/feed-osint/{event_id}.json"
             ev = fetch_json(url)
             attrs = ev.get("Event", {}).get("Attribute", [])
+            info = ev.get("Event", {}).get("info", "")[:50]
             total["events"] += 1
             
             for a in attrs:
@@ -102,13 +116,14 @@ def ingest_misp_osint(conn):
                 if not val:
                     continue
                 try:
-                    if atype in ("ip-dst") and "." in val:
+                    if atype in ("ip-dst", "ip-src") and "." in val and ":" not in val:
                         conn.execute("INSERT OR IGNORE INTO c2_ips VALUES (?,?,?,?,?)",
-                            (val[:45], "", "misp", ev.get("Event",{}).get("info","")[:50], 75))
+                            (val[:45], "", "misp", info, 75))
                         total["ips"] += 1
-                    elif atype in ("domain", "hostname"):
+                    elif atype in ("domain", "hostname", "domain|ip"):
+                        domain = val.split("|")[0] if "|" in val else val
                         conn.execute("INSERT OR IGNORE INTO c2_domains VALUES (?,?,?,?)",
-                            (val[:255], "", "misp", ev.get("Event",{}).get("info","")[:50]))
+                            (domain[:255], "", "misp", info))
                         total["domains"] += 1
                     elif atype in ("url", "uri"):
                         h = hashlib.md5(val.encode()).hexdigest()
@@ -116,12 +131,20 @@ def ingest_misp_osint(conn):
                             (h, val[:500], "", "misp"))
                         total["urls"] += 1
                     elif atype in ("md5", "sha256", "sha1"):
-                        sig = a.get("comment", ev.get("Event",{}).get("info",""))[:50]
+                        sig = a.get("comment", info)[:50]
                         conn.execute("INSERT OR IGNORE INTO malware_hashes VALUES (?,?,?)",
                             (val[:64], "", sig))
                         total["hashes"] += 1
                 except:
                     pass
+            
+            # Commit every 50 events to avoid huge transactions
+            if i % 50 == 0:
+                conn.commit()
+            
+            # Progress indicator
+            if i % 100 == 0 and i > 0:
+                print(f"    ... {i}/{len(event_ids)} events processed")
         except:
             pass
     
