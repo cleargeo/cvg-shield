@@ -1,0 +1,50 @@
+# Cloud-config autoinstall for CVG SHIELD VM
+# This gets mounted as the Ubuntu seed ISO
+
+#cloud-config
+autoinstall:
+  version: 1
+  # Hardware setup
+  storage:
+    layout:
+      name: direct
+  # Locale
+  locale: en_US.UTF-8
+  keyboard:
+    layout: us
+  # Identity
+  identity:
+    hostname: cvg-shield
+    username: cvg
+    password: $6$rounds=4096$salty$hashed_password_placeholder
+  # SSH - our public key will be injected here
+  ssh:
+    install-server: true
+    allow-pw: false
+    authorized-keys:
+      - PLACEHOLDER_REPLACE_WITH_PUBKEY
+  # Packages to install for security monitoring
+  packages:
+    - suricata
+    - zeek
+    - jq
+    - python3
+    - python3-pip
+    - python3-virtualenv
+    - sqlite3
+    - curl
+    - git
+    - wget
+    - net-tools
+    - tcpdump
+    - htop
+    - vim
+    - ufw
+    - fail2ban
+  # Run after install
+  late-commands:
+    - echo "CVG SHIELD DEPLOYED $(date -u)" > /etc/motd
+    - curtin in-target -- bash -c "echo 'cvg ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/cvg"
+    - curtin in-target -- bash -c "echo 'SSH authorized_keys deployed' >> /var/log/cvg-shield-init.log"
+  # Shutdown after install (no need for manual intervention)
+  shutdown: reboot

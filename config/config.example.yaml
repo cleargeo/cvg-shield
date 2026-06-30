@@ -1,0 +1,35 @@
+# CVG SHIELD Configuration Template
+# Copy to config/config.yaml and customize
+
+database: /tmp/cvg_shield.db
+report_dir: /tmp/cvg_shield_reports
+
+esxi:
+  host: 192.168.1.206
+  user: root
+  # Password in ~/.config/cvg/esxi_pass.txt
+
+ilo:
+  host: 192.168.1.148
+  user: Administrator
+  # Password in ~/.config/cvg/ilo_pass.txt
+
+nas:
+  synology:
+    user: azelenski
+  truenas:
+    api_key: ~/.config/cvg/truenas_api_key.txt
+
+pihole:
+  ip: 192.168.1.83
+  # web password in ~/.config/cvg/pihole_pass.txt
+
+blocklist_sources:
+  - https://lists.blocklist.de/lists/all.txt
+  - https://rules.emergingthreats.net/open-nogpl/suricata/rules/
+
+cisa_kev_url: "https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json"
+
+schedule:
+  vuln_scan: "0 */6 * * *"
+  blocklist_update: "0 3,15 * * *"
